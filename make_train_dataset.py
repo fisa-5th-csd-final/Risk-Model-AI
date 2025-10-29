@@ -28,12 +28,12 @@ def monitor(label="Dask merge"):
 print("📂 Step 1: card + account 병합 중...")
 
 dtype_card = {
-    'customer_id': 'category',
+    'customer_id': 'string',  # ✅ 문자열로 처리
     'BAS_YH': 'category',
     'SEX_CD': 'category',
     'MBR_RK': 'category'
 }
-dtype_account = {'customer_id': 'category'}
+dtype_account = {'customer_id': 'string'}  # ✅ 문자열로 처리
 
 card = dd.read_csv('card.csv', dtype=dtype_card, blocksize="256MB")
 account = dd.read_csv('account.csv', dtype=dtype_account, blocksize="128MB")
@@ -43,15 +43,16 @@ monitor_thread = threading.Thread(target=monitor, args=("Step 1 병합",), daemo
 monitor_thread.start()
 
 df = card.merge(account, on='customer_id', how='left')
-df = df.persist()  # 병합 결과를 메모리에 캐시 (compute 전에 최적화)
-df.compute()       # 실제 연산 수행
+df = df.persist()   # 병합 결과를 메모리에 캐시 (compute 전에 최적화)
+df.compute()        # 실제 연산 수행
+
 stop_flag = True
 monitor_thread.join()
 
 print("✅ Step 1 병합 완료 (Dask DataFrame)")
 print(f"💾 메모리 사용량: {psutil.virtual_memory().used / 1024**3:.2f} GB")
 
-# 임시 저장
+# 임시 저장 (Parquet 형식)
 tmp_path = "merged_card_account_tmp.parquet"
 df.to_parquet(tmp_path, engine="pyarrow", write_index=False)
 print(f"💾 임시 저장 완료 → {tmp_path}")
@@ -66,7 +67,7 @@ print("🧹 메모리 초기화 완료")
 print("\n📂 Step 2: loan 병합 중...")
 
 dtype_loan = {
-    'customer_id': 'category',
+    'customer_id': 'string',  # ✅ 문자열로 처리
     'loan_type': 'category',
     'interest_type': 'category',
     'repayment_method': 'category'
@@ -95,9 +96,12 @@ print(f"💾 메모리 사용량: {psutil.virtual_memory().used / 1024**3:.2f} G
 print("\n🧹 결측치 및 타입 정리 중...")
 
 df = df.replace([np.inf, -np.inf], np.nan)
-num_cols = [c for c, dt in df.dtypes.items() if np.issubdtype(dt, np.number)]
-cat_cols = [c for c, dt in df.dtypes.items() if dt == "category" or dt == "object"]
 
+# 수치형 / 범주형 컬럼 구분
+num_cols = [c for c, dt in df.dtypes.items() if np.issubdtype(dt, np.number)]
+cat_cols = [c for c, dt in df.dtypes.items() if dt == "category" or dt == "object" or dt == "string"]
+
+# 결측치 처리
 for col in num_cols:
     df[col] = df[col].fillna(df[col].median())
 for col in cat_cols:
@@ -109,6 +113,7 @@ print("✅ 결측치 처리 완료 (lazy)")
 # ④ 최종 저장
 # ===============================================================
 print("\n💾 최종 train_dataset.csv 저장 중...")
+
 stop_flag = False
 monitor_thread = threading.Thread(target=monitor, args=("CSV 저장",), daemon=True)
 monitor_thread.start()
@@ -121,5 +126,6 @@ monitor_thread.join()
 print("✅ train_dataset.csv 생성 완료!")
 print(f"📊 컬럼 수: {len(df.columns)}")
 
+# 임시파일 삭제
 os.remove(tmp_path)
 print("🧹 임시파일 삭제 완료!")
