@@ -94,23 +94,23 @@ for col in cat_cols:
 # ===============================================================
 print("\n단위 정리 및 타입 변환 중...")
 
-# ① 금액 컬럼 절사 (천원 단위)
+# 금액 컬럼 절사 (천원 단위)
 money_cols = ['salary', 'balance', 'principal_amount', 'remaining_principal']
 for col in money_cols:
     if col in df.columns:
         df[col] = (df[col] // 10_000).astype(int)
 
-# ② 나이·연체 여부 정수형 변환
+# 나이·연체 여부 정수형 변환
 int_cols = ['AGE', 'is_delinquent_x', 'is_delinquent_y']
 for col in int_cols:
     if col in df.columns:
         df[col] = df[col].fillna(0).astype(int)
 
-# ③ 금리만 소수점 2자리 유지
+# 금리만 소수점 2자리 유지
 if 'interest_rate' in df.columns:
     df['interest_rate'] = df['interest_rate'].round(2)
 
-print("✅ 단위 정리 및 타입 변환 완료")
+print("단위 정리 및 타입 변환 완료")
 
 gc.collect()
 mem = df.memory_usage(deep=True).sum() / 1024**2
@@ -144,5 +144,5 @@ for i in range(0, len(df), chunk_size):
 stop_flag = True
 monitor_thread.join()
 
-print(f"\n✅ train_dataset.csv 생성 완료 ({len(df):,}행, {len(df.columns)}열)")
+print(f"\ntrain_dataset.csv 생성 완료 ({len(df):,}행, {len(df.columns)}열)")
 print(df.head(3))
