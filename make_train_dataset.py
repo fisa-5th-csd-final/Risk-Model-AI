@@ -96,8 +96,14 @@ cat_cols = df.select_dtypes(include=['object', 'category']).columns
 
 if len(num_cols) > 0:
     df[num_cols] = df[num_cols].fillna(df[num_cols].median(numeric_only=True))
-if len(cat_cols) > 0:
-    df[cat_cols] = df[cat_cols].fillna('unknown')
+    
+for col in cat_cols:
+    if df[col].dtype.name == "category":
+        if 'unknown' not in df[col].cat.categories:
+            df[col] = df[col].cat.add_categories('unknown')
+        df[col] = df[col].fillna('unknown')
+    else:
+        df[col] = df[col].fillna('unknown')
 
 df[num_cols] = df[num_cols].apply(pd.to_numeric, downcast='float')
 gc.collect()
