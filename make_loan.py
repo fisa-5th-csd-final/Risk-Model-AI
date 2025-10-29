@@ -115,14 +115,14 @@ df['repayment_date'] = pd.to_datetime(df['repayment_date'])
 df = df[df['repayment_date'] > today]
 
 # ===============================================================
-# ⑩ 남은 원금 (remaining_principal)
+# 남은 원금 (remaining_principal)
 # ===============================================================
 rate_scaled = (df['interest_rate'] - 2.5) / 7
 df['remaining_principal'] = df['principal_amount'] * (0.2 + 0.7 * rate_scaled)
 df['remaining_principal'] = np.clip(df['remaining_principal'], 0, df['principal_amount'])
 
 # ===============================================================
-# ⑪ 연체 여부 (5% 내외)
+# 연체 여부 (5% 내외)
 # ===============================================================
 # 계산 전에 최신 상태의 consume_ratio, wealth_ratio를 다시 한 번 df 기준으로 생성
 df['consume_ratio'] = (df['TOT_USE_AM'] / np.maximum(df['salary'] * 10_000, 1)).clip(0, 5)
@@ -151,7 +151,7 @@ real_rate = df['is_delinquent'].mean() * 100
 print(f"현실적 연체율: {real_rate:.2f}%")
 
 # ===============================================================
-# ⑫ 단위 절사 및 저장 (진행률 모니터링 포함)
+# 단위 절사 및 저장 (진행률 모니터링 포함)
 # ===============================================================
 print("\nStep 2: loan.csv 저장 중...")
 stop_flag = False
