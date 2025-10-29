@@ -1,4 +1,3 @@
-import dask.dataframe as dd
 import pandas as pd
 import numpy as np
 import os
@@ -11,9 +10,7 @@ import time
 # 💡 실시간 모니터링 스레드
 # ===============================================================
 stop_flag = False
-
-def monitor(label="Dask merge"):
-    """5초마다 메모리·CPU·시간 경과 출력"""
+def monitor(label="Merge"):
     start = time.time()
     while not stop_flag:
         mem = psutil.virtual_memory().used / 1024**3
@@ -23,109 +20,75 @@ def monitor(label="Dask merge"):
         time.sleep(4)
 
 # ===============================================================
-# ① Step 1: card + account 병합
+# ① Step 1: card + account 병합 (전체 메모리에 올림)
 # ===============================================================
 print("📂 Step 1: card + account 병합 중...")
 
 dtype_card = {
-    'customer_id': 'string',  # ✅ 문자열로 처리
+    'customer_id': 'string',
     'BAS_YH': 'category',
     'SEX_CD': 'category',
     'MBR_RK': 'category'
 }
-dtype_account = {'customer_id': 'string'}  # ✅ 문자열로 처리
+dtype_account = {'customer_id': 'string'}
 
-card = dd.read_csv('card.csv', dtype=dtype_card, blocksize="256MB")
-account = dd.read_csv('account.csv', dtype=dtype_account, blocksize="128MB")
-
-# 모니터링 스레드 시작
-monitor_thread = threading.Thread(target=monitor, args=("Step 1 병합",), daemon=True)
-monitor_thread.start()
+card = pd.read_csv('card.csv', dtype=dtype_card, low_memory=False)
+account = pd.read_csv('account.csv', dtype=dtype_account, low_memory=False)
 
 df = card.merge(account, on='customer_id', how='left')
-df = df.persist()   # 병합 결과를 메모리에 캐시 (compute 전에 최적화)
-df.compute()        # 실제 연산 수행
+print(f"✅ Step 1 병합 완료: {df.shape}")
 
-stop_flag = True
-monitor_thread.join()
-
-print("✅ Step 1 병합 완료 (Dask DataFrame)")
-print(f"💾 메모리 사용량: {psutil.virtual_memory().used / 1024**3:.2f} GB")
-
-# 임시 저장 (Parquet 형식)
-tmp_path = "merged_card_account_tmp.parquet"
-df.to_parquet(tmp_path, engine="pyarrow", write_index=False)
-print(f"💾 임시 저장 완료 → {tmp_path}")
-
+# 임시 저장
+tmp_path = "merged_card_account_tmp.csv"
+df.to_csv(tmp_path, index=False)
 del card, account, df
 gc.collect()
 print("🧹 메모리 초기화 완료")
 
 # ===============================================================
-# ② Step 2: loan 병합
+# ② Step 2: loan을 chunk 단위로 병합
 # ===============================================================
-print("\n📂 Step 2: loan 병합 중...")
+print("\n📂 Step 2: loan chunk 단위 병합 중...")
 
+chunk_size = 100_000  # 🔧 메모리 여유에 따라 조정 (50k~200k 추천)
 dtype_loan = {
-    'customer_id': 'string',  # ✅ 문자열로 처리
+    'customer_id': 'string',
     'loan_type': 'category',
     'interest_type': 'category',
     'repayment_method': 'category'
 }
 
-df = dd.read_parquet(tmp_path)
-loan = dd.read_csv('loan.csv', dtype=dtype_loan, blocksize="256MB")
+merged_base = pd.read_csv(tmp_path, low_memory=False)
+output_path = "train_dataset.csv"
+if os.path.exists(output_path):
+    os.remove(output_path)
 
 stop_flag = False
-monitor_thread = threading.Thread(target=monitor, args=("Step 2 병합",), daemon=True)
+monitor_thread = threading.Thread(target=monitor, args=("loan 병합",), daemon=True)
 monitor_thread.start()
 
-df = df.merge(loan, on='customer_id', how='left')
-df = df.persist()
-df.compute()
+chunk_idx = 1
+for chunk in pd.read_csv('loan.csv', dtype=dtype_loan, chunksize=chunk_size):
+    print(f"  ▶ loan chunk {chunk_idx} 병합 중... ({len(chunk):,}행)")
+    merged = merged_base.merge(chunk, on='customer_id', how='left')
+    
+    # 결측치 간단히 처리
+    merged.replace([np.inf, -np.inf], np.nan, inplace=True)
+    merged.fillna("unknown", inplace=True)
+    
+    # 저장 (append 방식)
+    merged.to_csv(output_path, mode='a', index=False, header=(chunk_idx==1), encoding='utf-8-sig')
+    
+    del merged, chunk
+    gc.collect()
+    print(f"     └ 저장 완료 / 현재 메모리: {psutil.virtual_memory().used / 1024**3:.2f} GB")
+    chunk_idx += 1
 
 stop_flag = True
 monitor_thread.join()
 
-print("✅ Step 2 병합 완료 (lazy → computed)")
-print(f"💾 메모리 사용량: {psutil.virtual_memory().used / 1024**3:.2f} GB")
-
-# ===============================================================
-# ③ 결측치 처리 + 타입 최적화
-# ===============================================================
-print("\n🧹 결측치 및 타입 정리 중...")
-
-df = df.replace([np.inf, -np.inf], np.nan)
-
-# 수치형 / 범주형 컬럼 구분
-num_cols = [c for c, dt in df.dtypes.items() if np.issubdtype(dt, np.number)]
-cat_cols = [c for c, dt in df.dtypes.items() if dt == "category" or dt == "object" or dt == "string"]
-
-# 결측치 처리
-for col in num_cols:
-    df[col] = df[col].fillna(df[col].median())
-for col in cat_cols:
-    df[col] = df[col].fillna("unknown")
-
-print("✅ 결측치 처리 완료 (lazy)")
-
-# ===============================================================
-# ④ 최종 저장
-# ===============================================================
-print("\n💾 최종 train_dataset.csv 저장 중...")
-
-stop_flag = False
-monitor_thread = threading.Thread(target=monitor, args=("CSV 저장",), daemon=True)
-monitor_thread.start()
-
-df.to_csv("train_dataset.csv", single_file=True, index=False, encoding='utf-8-sig')
-
-stop_flag = True
-monitor_thread.join()
-
-print("✅ train_dataset.csv 생성 완료!")
-print(f"📊 컬럼 수: {len(df.columns)}")
-
-# 임시파일 삭제
+print("✅ Step 2 전체 병합 완료!")
 os.remove(tmp_path)
 print("🧹 임시파일 삭제 완료!")
+
+print(f"🎉 최종 train_dataset.csv 생성 완료 ({chunk_idx-1:,}개 청크)")
