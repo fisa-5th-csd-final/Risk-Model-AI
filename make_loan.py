@@ -59,7 +59,7 @@ age_factor = np.clip((df.get('AGE', 40) - 30) / 30, -0.5, 0.5)
 # ===============================================================
 salary_percentile = df['salary'].rank(pct=True)
 prob_collateral = 0.25 + 0.5 * salary_percentile  # 고소득자일수록 담보대출 비중↑
-df['loan_type'] = np.where(np.random.rand(len(df)) < prob_collateral, 'collateral', 'credit')
+df['loan_type'] = np.where(np.random.rand(len(df)) < prob_collateral, '1', '0')
 
 # ===============================================================
 # Step 5. 원금 (principal_amount)
@@ -69,7 +69,7 @@ base_principal = (df['salary'] * 10_000 * np.random.uniform(3, 10, len(df))) * (
 base_principal /= np.maximum(df['wealth_ratio'], 1)
 
 df['principal_amount'] = np.where(
-    df['loan_type'] == 'collateral',
+    df['loan_type'] == '1',
     np.clip(base_principal, 1_000_000, 500_000_000),
     np.clip(base_principal, 500_000, 150_000_000)
 )
@@ -84,9 +84,9 @@ df['interest_rate'] = np.clip(2.5 + base_rate + noise, 2.5, 9.5).round(3)
 # ===============================================================
 # Step 7. 금리 유형 / 상환 방식
 # ===============================================================
-df['interest_type'] = np.where(np.random.rand(len(df)) < 0.3, 'variable', 'fixed')
+df['interest_type'] = np.where(np.random.rand(len(df)) < 0.3, '1', '0')
 df['repayment_method'] = np.random.choice(
-    ['amortized', 'principal_equal', 'bullet'],
+    ['0', '1', '2'],
     size=len(df),
     p=[0.5, 0.3, 0.2]
 )
@@ -116,7 +116,7 @@ df['is_completed'] = (df['repayment_date'] <= today).astype(int)
 # ===============================================================
 # Step 9. 변동금리 고객 금리 조정 (분기별 ±0.5%)
 # ===============================================================
-var_idx = df['interest_type'] == 'variable'
+var_idx = df['interest_type'] == '1'
 if var_idx.any():
     fluctuation = np.random.uniform(-0.5, 0.5, var_idx.sum())
     df.loc[var_idx, 'interest_rate'] = (
