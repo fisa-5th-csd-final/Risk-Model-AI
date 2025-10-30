@@ -23,7 +23,7 @@ def monitor(label="loan 생성"):
         time.sleep(4)
 
 # ===============================================================
-# 데이터 로드 및 병합
+# Step 1. 데이터 로드 및 병합
 # ===============================================================
 print("Step 1: 데이터 로드 및 병합 중...")
 
@@ -36,37 +36,37 @@ if '고객 ID' in card.columns:
 df = card.merge(account, on=['customer_id', 'BAS_YH'], how='inner')
 print(f"병합 완료: {len(df):,}행 ({df['customer_id'].nunique():,}명)")
 
-# ===============================================================
-# NaN / inf 사전 제거
-# ===============================================================
+# NaN, inf 제거
 df.replace([np.inf, -np.inf], np.nan, inplace=True)
 df.fillna(0, inplace=True)
 
 # ===============================================================
-# 회원등급 수치화
+# Step 2. 회원등급 수치화
 # ===============================================================
 grade_map = {'VVIP': 21, 'VIP': 22, 'Platinum': 23, 'Gold': 24, 'None': 25}
 df['grade_num'] = df['MBR_RK'].map(grade_map).fillna(25).astype(int)
 
 # ===============================================================
-# 기본 지표 계산
+# Step 3. 기본 지표 계산
 # ===============================================================
-consume_ratio = (df['TOT_USE_AM'] / np.maximum(df['salary'] * 10_000, 1)).clip(0, 5)
-wealth_ratio = (df['balance'] / np.maximum(df['salary'] * 10_000, 1)).clip(0, 50)
+# ⚠️ salary, balance는 '만원 단위'이므로 10,000을 곱하지 않음
+df['consume_ratio'] = (df['TOT_USE_AM'] / np.maximum(df['salary'], 1)).clip(0, 5)
+df['wealth_ratio'] = (df['balance'] / np.maximum(df['salary'], 1)).clip(0, 50)
 age_factor = np.clip((df.get('AGE', 40) - 30) / 30, -0.5, 0.5)
 
 # ===============================================================
-# 대출 유형 (확률 기반)
+# Step 4. 대출 유형 (확률 기반)
 # ===============================================================
 salary_percentile = df['salary'].rank(pct=True)
-prob_collateral = 0.2 + 0.6 * salary_percentile
+prob_collateral = 0.25 + 0.5 * salary_percentile  # 고소득자일수록 담보대출 비중↑
 df['loan_type'] = np.where(np.random.rand(len(df)) < prob_collateral, 'collateral', 'credit')
 
 # ===============================================================
-# 원금 (principal_amount)
+# Step 5. 원금 (principal_amount)
 # ===============================================================
-base_principal = (df['salary'] * np.random.uniform(5, 15, len(df))) * (26 - df['grade_num']) / 6
-base_principal /= np.maximum(wealth_ratio, 1)
+# 현실적 비율 조정 (급여 대비 약 3~10배, 부유층은 낮게)
+base_principal = (df['salary'] * 10_000 * np.random.uniform(3, 10, len(df))) * (26 - df['grade_num']) / 6
+base_principal /= np.maximum(df['wealth_ratio'], 1)
 
 df['principal_amount'] = np.where(
     df['loan_type'] == 'collateral',
@@ -75,14 +75,14 @@ df['principal_amount'] = np.where(
 )
 
 # ===============================================================
-# 금리 (interest_rate)
+# Step 6. 금리 (interest_rate)
 # ===============================================================
-base_rate = (df['grade_num'] - 20) * 0.5 + consume_ratio * 0.7 - age_factor * 0.8
+base_rate = (df['grade_num'] - 20) * 0.7 + df['consume_ratio'] * 0.8 - age_factor * 0.8
 noise = np.random.normal(0, 0.4, len(df))
 df['interest_rate'] = np.clip(2.5 + base_rate + noise, 2.5, 9.5).round(3)
 
 # ===============================================================
-# 금리 유형 / 상환 방식
+# Step 7. 금리 유형 / 상환 방식
 # ===============================================================
 df['interest_type'] = np.where(np.random.rand(len(df)) < 0.3, 'variable', 'fixed')
 df['repayment_method'] = np.random.choice(
@@ -92,7 +92,7 @@ df['repayment_method'] = np.random.choice(
 )
 
 # ===============================================================
-# 상환일 (각 분기 이후 2~5년)
+# Step 8. 상환일 (각 분기 이후 2~5년)
 # ===============================================================
 def parse_quarter_to_date(bas_yh):
     if isinstance(bas_yh, str) and 'Q' in bas_yh:
@@ -104,7 +104,6 @@ def parse_quarter_to_date(bas_yh):
         return datetime(2024, 3, 31)
 
 df['quarter_date'] = df['BAS_YH'].apply(parse_quarter_to_date)
-
 df['repayment_date'] = [
     (qd + pd.to_timedelta(np.random.randint(365*2, 365*5), unit='D')).date()
     for qd in df['quarter_date']
@@ -115,33 +114,29 @@ df['repayment_date'] = pd.to_datetime(df['repayment_date'])
 df['is_completed'] = (df['repayment_date'] <= today).astype(int)
 
 # ===============================================================
-# 변동금리 고객 금리 조정 (분기별 ±0.5% 변동)
+# Step 9. 변동금리 고객 금리 조정 (분기별 ±0.5%)
 # ===============================================================
 var_idx = df['interest_type'] == 'variable'
-n_var = var_idx.sum()
-if n_var > 0:
-    fluctuation = np.random.uniform(-0.5, 0.5, n_var)
+if var_idx.any():
+    fluctuation = np.random.uniform(-0.5, 0.5, var_idx.sum())
     df.loc[var_idx, 'interest_rate'] = (
         df.loc[var_idx, 'interest_rate'] + fluctuation
     ).clip(2.5, 9.5).round(3)
 
 # ===============================================================
-# 남은 원금 (remaining_principal)
+# Step 10. 남은 원금 (remaining_principal)
 # ===============================================================
 rate_scaled = (df['interest_rate'] - 2.5) / 7
 df['remaining_principal'] = df['principal_amount'] * (0.2 + 0.7 * rate_scaled)
 df['remaining_principal'] = np.clip(df['remaining_principal'], 0, df['principal_amount'])
 
 # ===============================================================
-# 연체 여부 (5% 내외)
+# Step 11. 연체 여부 (5% 내외)
 # ===============================================================
-df['consume_ratio'] = (df['TOT_USE_AM'] / np.maximum(df['salary'] * 10_000, 1)).clip(0, 5)
-df['wealth_ratio'] = (df['balance'] / np.maximum(df['salary'] * 10_000, 1)).clip(0, 50)
-
 risk_score = (
-    1.5 * np.log1p(df['consume_ratio'] * 10) +
+    1.4 * np.log1p(df['consume_ratio'] * 10) +
     1.0 * (df['interest_rate'] / 9.5) -
-    0.7 * np.log1p(df['wealth_ratio'] + 1) +
+    0.8 * np.log1p(df['wealth_ratio'] + 1) +
     np.random.normal(0, 0.3, len(df))
 )
 
@@ -150,12 +145,11 @@ risk_prob = 1 / (1 + np.exp(-risk_score))
 
 threshold = np.quantile(risk_prob, 0.95)
 df['is_delinquent'] = (risk_prob > threshold).astype(int)
-
 real_rate = df['is_delinquent'].mean() * 100
 print(f"현실적 연체율: {real_rate:.2f}%")
 
 # ===============================================================
-# 단위 절사 및 저장
+# Step 12. 단위 절사 및 저장
 # ===============================================================
 print("\nStep 2: loan.csv 저장 중...")
 stop_flag = False
@@ -164,7 +158,7 @@ monitor_thread.start()
 
 money_cols = ['principal_amount', 'remaining_principal']
 for col in money_cols:
-    df[col] = (df[col] // 10_000).astype(int)
+    df[col] = (df[col] // 10_000).astype(int)  # 만원 단위 절사
 
 loan = df[['customer_id', 'BAS_YH', 'loan_type', 'principal_amount',
            'remaining_principal', 'interest_rate', 'interest_type',

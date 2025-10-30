@@ -1,16 +1,16 @@
 import pandas as pd
 import numpy as np
-import os
 import psutil
-import gc
 import threading
 import time
 
+np.random.seed(42)
+
 # ===============================================================
-# 실시간 모니터링 스레드
+# 실시간 진행 모니터
 # ===============================================================
 stop_flag = False
-def monitor(label="Progress"):
+def monitor(label="account 생성"):
     start = time.time()
     while not stop_flag:
         mem = psutil.virtual_memory().used / 1024**3
@@ -20,9 +20,9 @@ def monitor(label="Progress"):
         time.sleep(4)
 
 # ===============================================================
-# 파일 로드 + 고객 단위 요약
+# card 데이터 로드
 # ===============================================================
-print("Step 1: 데이터 로드 및 요약 중...")
+print("card.csv 로드 중...")
 
 dtype_card = {
     'customer_id': 'string',
@@ -30,115 +30,76 @@ dtype_card = {
     'SEX_CD': 'category',
     'MBR_RK': 'category'
 }
-dtype_account = {'customer_id': 'string'}
-dtype_loan = {
-    'customer_id': 'string',
-    'loan_type': 'category',
-    'interest_type': 'category',
-    'repayment_method': 'category'
-}
 
 card = pd.read_csv('card.csv', dtype=dtype_card, low_memory=False)
-account = pd.read_csv('account.csv', dtype=dtype_account, low_memory=False)
-loan = pd.read_csv('loan.csv', dtype=dtype_loan, low_memory=False)
-
-print(f"파일 로드 완료 | card: {len(card):,}행 | account: {len(account):,}행 | loan: {len(loan):,}행")
-
-# -----------------------------
-# 고객 단위로 요약 (행 수 최소화)
-# -----------------------------
-print("Step 1-1: account 요약 중...")
-account_summary = account.groupby('customer_id', as_index=False).agg({
-    'balance': 'sum'
-})
-print(f"account 요약 완료: {len(account_summary):,}명")
-
-print("Step 1-2: loan 요약 중...")
-loan_summary = loan.groupby('customer_id', as_index=False).agg({
-    'principal_amount': 'sum',
-    'remaining_principal': 'sum',
-    'interest_rate': 'mean',
-    'loan_type': 'first',
-    'interest_type': 'first',
-    'repayment_method': 'first'
-})
-print(f"loan 요약 완료: {len(loan_summary):,}명")
-
-del account, loan
-gc.collect()
+print(f"card.csv 로드 완료 ({len(card):,}행, {card['customer_id'].nunique():,}명)")
 
 # ===============================================================
-# card + account_summary + loan_summary 병합
+# 고객별 기준급여(base salary) 생성
 # ===============================================================
-print("\nStep 2: 병합 시작 (card 기준 유지)")
+print("\n고객별 기준 급여 생성 중...")
+
+customer_spend = card.groupby('customer_id')['TOT_USE_AM'].mean().rank(pct=True)
+
+grade_weight = {'VVIP': 1.3, 'VIP': 1.2, 'Platinum': 1.1, 'Gold': 1.0, 'None': 0.9}
+card['grade_weight'] = card['MBR_RK'].map(grade_weight).fillna(1.0)
+
+age_factor = np.where(card['AGE'] < 30, 0.9, np.where(card['AGE'] < 50, 1.0, 1.1))
+sex_factor = np.where(card['SEX_CD'] == '1', 1.05, 1.0)
+
+base_salary_map = customer_spend.apply(
+    lambda x: np.random.lognormal(mean=14.5 + x * 0.25, sigma=0.35)
+)
+card = card.merge(base_salary_map.rename('base_salary'), on='customer_id', how='left')
+
+# ===============================================================
+# 분기별 급여 & 잔액 생성
+# ===============================================================
+print("\n분기별 급여·잔액 생성 중...")
 
 stop_flag = False
-monitor_thread = threading.Thread(target=monitor, args=("병합 진행",), daemon=True)
+monitor_thread = threading.Thread(target=monitor, args=("account 생성",), daemon=True)
 monitor_thread.start()
 
-df = card.merge(account_summary, on='customer_id', how='left') \
-         .merge(loan_summary, on='customer_id', how='left')
+card['quarter_factor'] = card['BAS_YH'].astype(str).str[-1].map({
+    '1': 0.9, '2': 1.0, '3': 1.05, '4': 1.15
+}).fillna(1.0)
+
+card['salary'] = (
+    card['base_salary'] *
+    card['grade_weight'] *
+    age_factor *
+    sex_factor *
+    np.random.uniform(0.9, 1.1, len(card))
+)
+card['salary'] = np.clip(card['salary'], 2_000_000, 15_000_000)
+card['salary'] = (card['salary'] / 10_000).astype(int)
+
+card['TOT_USE_AM'] = card['TOT_USE_AM'].fillna(0)
+
+# 잔액 생성: 급여 10~25배, 시즌·소비 반영, 최소 1000만 원 이상
+balance_base = (
+    card['salary'] * 10_000 * np.random.uniform(10, 25, len(card)) *
+    card['quarter_factor'] *
+    np.random.uniform(0.8, 1.2, len(card)) -
+    card['TOT_USE_AM'] * np.random.uniform(0.4, 0.8, len(card))
+)
+
+card['balance'] = np.clip(balance_base, 1_000_000, 500_000_000)
+card['balance'] = (card['balance'] / 10_000).astype(int)
 
 stop_flag = True
 monitor_thread.join()
 
-print(f"Step 2 병합 완료: {df.shape}")
-print(f"현재 메모리 사용량: {psutil.virtual_memory().used / 1024**3:.2f} GB")
+print(f"급여·잔액 생성 완료 | 평균 급여: {card['salary'].mean():,.0f}만원 | 평균 잔액: {card['balance'].mean():,.0f}만원")
 
 # ===============================================================
-# 결측치 처리 + 타입 최적화
+# account.csv 저장
 # ===============================================================
-print("\nStep 3: 결측치 처리 중...")
+print("\naccount.csv 저장 중...")
 
-df.replace([np.inf, -np.inf], np.nan, inplace=True)
-num_cols = df.select_dtypes(include=['float', 'int']).columns
-cat_cols = df.select_dtypes(include=['object', 'category']).columns
+account = card[['customer_id', 'BAS_YH', 'salary', 'balance']]
+account.to_csv('account.csv', index=False, encoding='utf-8-sig')
 
-if len(num_cols) > 0:
-    df[num_cols] = df[num_cols].fillna(df[num_cols].median(numeric_only=True))
-    
-for col in cat_cols:
-    if df[col].dtype.name == "category":
-        if 'unknown' not in df[col].cat.categories:
-            df[col] = df[col].cat.add_categories('unknown')
-        df[col] = df[col].fillna('unknown')
-    else:
-        df[col] = df[col].fillna('unknown')
-
-df[num_cols] = df[num_cols].apply(pd.to_numeric, downcast='float')
-gc.collect()
-print(f"결측치 처리 완료 | 메모리 사용량: {psutil.virtual_memory().used / 1024**3:.2f} GB")
-
-# ===============================================================
-# 저장 (진행률 표시)
-# ===============================================================
-output_path = "train_dataset.csv"
-print("\nStep 4: train_dataset.csv 저장 중...")
-
-chunk_size = 200_000
-total_rows = len(df)
-written = 0
-first = True
-
-stop_flag = False
-monitor_thread = threading.Thread(target=monitor, args=("CSV 저장",), daemon=True)
-monitor_thread.start()
-
-for start in range(0, total_rows, chunk_size):
-    df.iloc[start:start+chunk_size].to_csv(
-        output_path,
-        mode='w' if first else 'a',
-        header=first,
-        index=False,
-        encoding='utf-8-sig'
-    )
-    first = False
-    written += chunk_size
-    progress = min(written / total_rows * 100, 100)
-    print(f"저장 진행률: {progress:5.1f}% ({min(written,total_rows):,}/{total_rows:,})")
-
-stop_flag = True
-monitor_thread.join()
-
-print(f"\ntrain_dataset.csv 생성 완료! ({len(df):,}행, {len(df.columns)}컬럼)")
-print(f"최종 메모리 사용량: {psutil.virtual_memory().used / 1024**3:.2f} GB")
+print(f"account.csv 생성 완료 ({len(account):,}행, {account['customer_id'].nunique():,}명)")
+print(account.head(5))
